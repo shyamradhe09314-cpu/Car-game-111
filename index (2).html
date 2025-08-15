@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Car vs Car — 3 Lanes (Two‑Player)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#111; font-family:system-ui, -apple-system, Arial; }
+  #gameWrap { position:relative; width:100%; height:100vh; overflow:hidden; touch-action:manipulation; }
+  canvas { display:block; width:100%; height:100%; background:#1a1a1a; }
+
+  /* HUD */
+  .hud { position:absolute; top:8px; left:50%; transform:translateX(-50%); color:#eee; font-size:14px; text-align:center; }
+  .hud .row { margin:2px 0; opacity:0.9; }
+
+  /* Controls */
+  .pad { position:absolute; bottom:8px; width:46%; display:grid; grid-template-columns:1fr 1fr 1fr; grid-template-rows:auto auto; gap:6px; }
+  .pad.left { left:8px; }
+  .pad.right { right:8px; }
+  .btn { padding:12px 8px; background:#2a2a2a; color:#eee; border:1px solid #444; border-radius:10px; user-select:none; text-align:center; font-size:16px; }
+  .btn:active { transform:scale(0.98); background:#333; }
+
+  /* Game Over overlay */
+  #overlay { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,0.6); color:#fff; text-align:center; }
+  #overlay .box { background:#202020; border:1px solid #444; border-radius:14px; padding:16px 18px; max-width:90%; }
+  #overlay h2 { margin:0 0 6px; font-size:22px; }
+  #overlay p { margin:6px 0; font-size:14px; opacity:0.9; }
+  #overlay button { margin-top:10px; padding:10px 14px; border-radius:10px; background:#3b82f6; color:#fff; border:none; font-size:15px; }
+</style>
+</head>
+<body>
+  <div id="gameWrap">
+    <canvas id="game"></canvas>
+
+    <div class="hud">
+      <div class="row">🎮 <b>Two-Player</b> | 3 Lanes | Avoid Head‑On Collision</div>
+      <div class="row">Player A (⬇️→⬆️): A/D (lane) • W/S (speed) | Player B (⬆️→⬇️): J/L (lane) • I/K (speed)</div>
+    </div>
+
+    <!-- Player A (left) controls -->
+    <div class="pad left">
+      <div class="btn" data-act="A-left">◀</div>
+      <div class="btn" data-act="A-speed-up">▲</div>
+      <div class="btn" data-act="A-right">▶</div>
+      <div class="btn">Lane</div>
+      <div class="btn" data-act="A-speed-down">▼</div>
+      <div class="btn">Speed</div>
+    </div>
+
+    <!-- Player B (right) controls -->
+    <div class="pad right">
+      <div class="btn" data-act="B-left">◀</div>
+      <div class="btn" data-act="B-speed-up">▲</div>
+      <div class="btn" data-act="B-right">▶</div>
+      <div class="btn">Lane</div>
+      <div class="btn" data-act="B-speed-down">▼</div>
+      <div class="btn">Speed</div>
+    </div>
+
+    <!-- Game over -->
+    <div id="overlay">
+      <div class="box">
+        <h2>Game Over 💥</h2>
+        <p id="reason">Cars collided!</p>
+        <p><small>Tip: जल्दी लेन बदलो या स्पीड एडजस्ट करो।</small></p>
+        <button id="restartBtn">Restart</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function() {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d', { alpha:false });
+
+  const overlay = document.getElementById('overlay');
+  const reasonEl = document.getElementById('reason');
+  const restartBtn = document.getElementById('restartBtn');
+
+  // Responsive canvas
+  function resize() {
+    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    canvas.width  = Math.floor(canvas.clientWidth * dpr);
+    canvas.height = Math.floor(canvas.clientHeight * dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0); // draw in CSS pixels
+  }
+  window.addEventListener('resize', resize, { passive:true });
+  resize();
+
+  // World/track
+  const lanes = 3;
+  let laneXs = []; // computed per frame from size
+  const trackPadding = 24; // left/right
+  const roadColor = '#262626';
+  const laneLineColor = '#3a3a3a';
+
+  // Car shape
+  const carW = 44, carH = 72, corner = 10;
+
+  // Player states
+  const pA = { lane: 1, y: 0,  speed: 4.0, color:'#39d353', name:'A', dir:-1 }; // bottom -> up (y decreasing)
+  const pB = { lane: 1, y: 0,  speed: 4.0, color:'#60a5fa', name:'B', dir:+1 }; // top -> down (y increasing)
+
+  const speedMin = 1.2, speedMax = 12.0, speedStep = 0.6;
+
+  let gameOver = false;
+  let lastT = performance.now();
+
+  function reset() {
+    // center lane by default
+    pA.lane = 1; pB.lane = 1;
+    // place A near bottom, B near top
+    pA.y = canvas.clientHeight - 90;
+    pB.y = 18;
+    pA.speed = 4.0; pB.speed = 4.0;
+    gameOver = false;
+    overlay.style.display = 'none';
+    lastT = performance.now();
+  }
+
+  function computeLaneXs() {
+    const w = canvas.clientWidth;
+    const usable = w - trackPadding*2;
+    laneXs = [];
+    for (let i=0;i<lanes;i++) {
+      const x = trackPadding + usable*( (i+0.5)/lanes );
+      laneXs.push(Math.round(x));
+    }
+  }
+
+  function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+
+  function changeLane(p, delta) {
+    p.lane = clamp(p.lane + delta, 0, lanes-1);
+  }
+  function changeSpeed(p, delta) {
+    p.speed = clamp(p.speed + delta, speedMin, speedMax);
+  }
+
+  // Keyboard controls
+  window.addEventListener('keydown', (e) => {
+    if (gameOver && (e.key.toLowerCase() === 'r' || e.key === 'Enter' || e.key === ' ')) { reset(); return; }
+    switch (e.key.toLowerCase()) {
+      // Player A: A/D lane, W/S speed
+      case 'a': changeLane(pA, -1); break;
+      case 'd': changeLane(pA, +1); break;
+      case 'w': changeSpeed(pA, +speedStep); break;
+      case 's': changeSpeed(pA, -speedStep); break;
+      // Player B: J/L lane, I/K speed
+      case 'j': changeLane(pB, -1); break;
+      case 'l': changeLane(pB, +1); break;
+      case 'i': changeSpeed(pB, +speedStep); break;
+      case 'k': changeSpeed(pB, -speedStep); break;
+    }
+  });
+
+  // Touch buttons
+  document.querySelectorAll('.btn').forEach(btn=>{
+    btn.addEventListener('click', () => {
+      const act = btn.getAttribute('data-act');
+      if (!act) return;
+
+      if (act === 'A-left') changeLane(pA, -1);
+      if (act === 'A-right') changeLane(pA, +1);
+      if (act === 'A-speed-up') changeSpeed(pA, +speedStep);
+      if (act === 'A-speed-down') changeSpeed(pA, -speedStep);
+
+      if (act === 'B-left') changeLane(pB, -1);
+      if (act === 'B-right') changeLane(pB, +1);
+      if (act === 'B-speed-up') changeSpeed(pB, +speedStep);
+      if (act === 'B-speed-down') changeSpeed(pB, -speedStep);
+    }, { passive:true });
+  });
+  document.getElementById('restartBtn').addEventListener('click', reset);
+
+  function drawTrack() {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    // road area
+    ctx.fillStyle = roadColor;
+    ctx.fillRect(0,0,w,h);
+    // lane lines
+    computeLaneXs();
+    ctx.strokeStyle = laneLineColor;
+    ctx.lineWidth = 2;
+    for (let i=1;i<lanes;i++) {
+      const mid = (laneXs[i] + laneXs[i-1]) / 2;
+      ctx.setLineDash([12, 10]);
+      ctx.beginPath();
+      ctx.moveTo(mid, 0);
+      ctx.lineTo(mid, h);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    // borders
+    ctx.strokeStyle = '#4a4a4a';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(trackPadding-6, 4, w-(trackPadding-6)*2, h-8);
+  }
+
+  function drawCar(p) {
+    const xCenter = laneXs[p.lane];
+    const x = xCenter - carW/2;
+    const y = p.y - carH/2;
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.beginPath();
+    if (ctx.roundRect) { ctx.roundRect(x+3, y+6, carW, carH, corner); } else { ctx.rect(x+3, y+6, carW, carH); }
+    ctx.fill();
+
+    // Body
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    if (ctx.roundRect) { ctx.roundRect(x, y, carW, carH, corner); } else { ctx.rect(x, y, carW, carH); }
+    ctx.fill();
+
+    // Windshield
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.fillRect(x+8, y+10, carW-16, 20);
+
+    // Direction arrow
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath();
+    if (p.dir < 0) { // up
+      ctx.moveTo(x+carW/2, y+10);
+      ctx.lineTo(x+carW/2-8, y+24);
+      ctx.lineTo(x+carW/2+8, y+24);
+    } else { // down
+      ctx.moveTo(x+carW/2, y+carH-10);
+      ctx.lineTo(x+carW/2-8, y+carH-24);
+      ctx.lineTo(x+carW/2+8, y+carH-24);
+    }
+    ctx.closePath(); ctx.fill();
+  }
+
+  function updatePositions(dt) {
+    const h = canvas.clientHeight;
+    pA.y += -pA.speed * (60*dt); // up
+    pB.y +=  pB.speed * (60*dt); // down
+
+    // wrap to keep infinite play
+    if (pA.y < -carH/2) pA.y = h + carH/2;
+    if (pB.y >  h + carH/2) pB.y = -carH/2;
+  }
+
+  function checkCollision() {
+    // collision only if same lane
+    if (pA.lane !== pB.lane) return false;
+
+    // Rect overlap
+    const ax = (laneXs[pA.lane] - carW/2), ay = (pA.y - carH/2);
+    const bx = (laneXs[pB.lane] - carW/2), by = (pB.y - carH/2);
+    const overlapX = !(ax + carW < bx || bx + carW < ax);
+    const overlapY = !(ay + carH < by || by + carH < ay);
+    return overlapX && overlapY;
+  }
+
+  let prev = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - prev) / 1000); // clamp for stability
+    prev = now;
+
+    // draw
+    ctx.clearRect(0,0,canvas.clientWidth, canvas.clientHeight);
+    drawTrack();
+    updatePositions(dt);
+    drawCar(pA);
+    drawCar(pB);
+
+    if (!gameOver && checkCollision()) {
+      gameOver = true;
+      overlay.style.display = 'flex';
+      reasonEl.textContent = 'Cars collided on the same lane!';
+      return; // stop loop until restart
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  reset();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
